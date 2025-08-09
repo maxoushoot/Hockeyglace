@@ -261,8 +261,10 @@ document.getElementById('btnPass').addEventListener('click', ()=>{
 document.getElementById('btnShoot').addEventListener('click', ()=>{
   if(!selected){ toast('Sélectionne un joueur'); return; }
   if(puck.carrier!==selected){ toast("Ce joueur n'a pas le puck"); return; }
-  // Tir vers le haut (but adverse)
-  puck.x=selected.x; puck.y=selected.y; puck.shootUp(1200);
+  // Tir vers le haut (but adverse) avec légère visée horizontale
+  const gL=(W-goalW)/2, gR=gL+goalW;
+  const aimX = clamp(selected.x + joyVX*80, gL+10, gR-10);
+  puck.x=selected.x; puck.y=selected.y; puck.passTo(aimX, pad-20, 1200);
   beep(760,0.07,'sawtooth',0.04); buzz(20);
 });
 document.getElementById('btnSwitch').addEventListener('click', ()=>{
@@ -304,6 +306,28 @@ function nearestAhead(from, team){
   return best;
 }
 
+/* Variante pour l'IA rouge : chercher un coéquipier plus bas (vers ton but) tout en évitant les bleus */
+function findBestRedPass(from){
+  let best=null, score=-1e9;
+  for(const m of red){
+    if(m===from || m.role==='goalie') continue;
+    const downScore = (m.y - from.y); // plus bas = mieux
+    const d = dist(from.x,from.y,m.x,m.y);
+    let risk=0;
+    for(const b of blue){
+      const ax=from.x, ay=from.y, bx=m.x, by=m.y, cx=b.x, cy=b.y;
+      const abx=bx-ax, aby=by-ay, ab2=abx*abx+aby*aby||1;
+      const t=clamp(((cx-ax)*abx + (cy-ay)*aby)/ab2, 0, 1);
+      const px=ax+t*abx, py=ay+t*aby;
+      const ds=dist(px,py,cx,cy);
+      if(ds<60) risk += (60-ds);
+    }
+    const sc = downScore*0.3 - d*0.15 - risk*0.6;
+    if(sc>score){ score=sc; best=m; }
+  }
+  return best;
+}
+
 /* ===== Virtual Joystick ===== */
 const joy=document.getElementById('joystick'), knob=document.getElementById('knob');
 let joyActive=false, joyCx=0, joyCy=0, joyRad=0, joyVX=0, joyVY=0;
@@ -341,36 +365,46 @@ joy.addEventListener('mousedown', joyStart);
 addEventListener('mousemove', joyMove);
 addEventListener('mouseup', joyEnd);
 
-/* ===== AI rouge (simple mais joueuse) ===== */
+/* ===== IA rouge améliorée ===== */
 function aiStep(dt){
   const hasRed = puck.carrier && puck.carrier.color==='red';
+  const gL=(W-goalW)/2, gR=gL+goalW;
   for(const p of red){
     if(p.role==='goalie') continue;
     if(hasRed){
       if(p===puck.carrier){
-        // tirer si proche du bas (ton but) et centré
-        if(p.y>H*0.7 && Math.random()<0.2){
-          puck.x=p.x; puck.y=p.y; puck.shootDown(1100); // attaque vers le bas
-        } else if(Math.random()<0.25){
-          // passe à un coéquipier plus bas (vers le bas)
-          const mate = red.filter(m=>m!==p && m.role!=='goalie').sort((a,b)=> (b.y-a.y) )[0];
-          if(mate){ puck.x=p.x; puck.y=p.y; puck.passTo(mate.x, mate.y, 900); }
+        const centered=Math.abs(p.x-W/2)<goalW*0.4;
+        // tenter un tir puissant si proche du but adverse
+        if(p.y>H*0.7 && centered && Math.random()<0.45){
+          const aimX=clamp(p.x+rand(-goalW*0.25,goalW*0.25), gL+10, gR-10);
+          puck.x=p.x; puck.y=p.y; puck.passTo(aimX, H+30, 1100);
         } else {
-          // progresse vers le bas
-          p.vx += rand(-40,40); p.vy += 140;
+          // sinon chercher la meilleure passe vers l'avant
+          const mate=findBestRedPass(p);
+          if(mate && Math.random()<0.8){
+            puck.x=p.x; puck.y=p.y; puck.passTo(mate.x, mate.y, 900);
+          } else {
+            // progression contrôlée vers le bas
+            const [nx,ny]=norm(W/2 - p.x, H-pad - p.y);
+            p.vx += nx*120; p.vy += ny*160;
+          }
         }
       } else {
-        // soutien : se placer en triangles
-        p.vx += rand(-20,20); p.vy += 60;
+        // soutien : se démarquer en avance
+        const spread = (p.x < puck.carrier.x ? -80 : 80);
+        p.vx += (puck.carrier.x + spread - p.x)*1.2;
+        p.vy += (puck.carrier.y - 40 - p.y)*1.2;
       }
     } else {
-      // Sans puck : marquer le porteur bleu ou se replacer
+      // Défense : marquer le porteur bleu sinon revenir en zone haute
       const carrierBlue = puck.carrier && puck.carrier.color==='blue' ? puck.carrier : nearestToPuck(blue);
       if(carrierBlue){
         const [nx,ny]=norm(carrierBlue.x - p.x, carrierBlue.y - p.y);
-        p.vx += nx*100; p.vy += ny*100;
+        p.vx += nx*120; p.vy += ny*120;
       } else {
-        p.vx += rand(-30,30); p.vy += rand(-10,10);
+        const targetY = pad + 120;
+        p.vx += rand(-20,20);
+        p.vy += (targetY - p.y)*0.5;
       }
     }
   }
