@@ -61,7 +61,7 @@ function rand(a,b){return a+Math.random()*(b-a)}
 let audioCtx=null;
 function beep(freq=440,dur=0.05,type='triangle',vol=0.03){
   try{
-    audioCtx ||= new (window.AudioContext||window.webkitAudioContext)();
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     const o=audioCtx.createOscillator(), g=audioCtx.createGain();
     o.type=type; o.frequency.value=freq; g.gain.value=vol;
     o.connect(g); g.connect(audioCtx.destination); o.start(); setTimeout(()=>o.stop(), dur*1000);
