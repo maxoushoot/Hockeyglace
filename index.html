@@ -1,23 +1,417 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>Puck Clash Mobile</title>
-  <link rel="stylesheet" href="style.css" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Hockey Palets 6v6 — Portrait + Joystick</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#0b132b;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;touch-action:none}
+  #game{display:block;width:100vw;height:78vh;background:#1c2541;border-top:4px solid #3a506b;border-bottom:4px solid #3a506b}
+  .hud{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;gap:8px}
+  .scores{display:flex;gap:8px;align-items:baseline;font-size:18px}
+  .badge{padding:2px 8px;border-radius:999px;background:#5bc0be;color:#001219;font-weight:900}
+  .controls{position:fixed;left:12px;bottom:12px;right:12px;height:20vh;display:flex;justify-content:space-between;align-items:flex-end;pointer-events:none}
+  /* Joystick */
+  .joy{position:relative;width:36vw;max-width:240px;aspect-ratio:1/1;border-radius:999px;background:#00000020;outline:2px solid #ffffff22;pointer-events:auto;touch-action:none}
+  .joy .knob{position:absolute;left:50%;top:50%;width:40%;aspect-ratio:1/1;border-radius:999px;background:#5bc0be55;outline:3px solid #5bc0be;transform:translate(-50%,-50%)}
+  /* Buttons */
+  .btns{display:flex;flex-direction:column;gap:10px;pointer-events:auto}
+  .btn{background:#3a506b;color:#fff;border:none;padding:12px 16px;border-radius:12px;font-weight:900;min-width:140px;text-align:center}
+  .btn:active{transform:scale(.98)}
+  .help{padding:6px 12px;opacity:.85;font-size:13px}
+  .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#000c;padding:10px 14px;border-radius:10px;font-weight:800;z-index:9}
+</style>
 </head>
 <body>
   <div class="hud">
     <div class="scores">
-      <span>👤 <strong id="scorePlayer">0</strong></span>
-      <span>—</span>
-      <span><strong id="scoreAI">0</strong> 🤖</span>
+      <span>🔵 <strong id="scoreBlue">0</strong></span><span>—</span><span><strong id="scoreRed">0</strong> 🔴</span>
+      <span class="badge">But en haut (adversaire) — Ton but en bas</span>
     </div>
-    <button id="resetBtn">↻ Reset</button>
+    <div>
+      <button id="btnReset" class="btn">↻ Reset</button>
+      <button id="btnPause" class="btn">⏸︎ Pause</button>
+    </div>
   </div>
 
   <canvas id="game"></canvas>
 
-  <script src="game.js"></script>
+  <div class="controls">
+    <div id="joystick" class="joy">
+      <div class="knob" id="knob"></div>
+    </div>
+    <div class="btns">
+      <button id="btnPass" class="btn">Passer</button>
+      <button id="btnShoot" class="btn">Tirer</button>
+      <button id="btnSwitch" class="btn">Changer joueur</button>
+    </div>
+  </div>
+
+  <div class="help">Astuce : tape sur un <b>joueur bleu</b> pour le sélectionner. Utilise le <b>joystick</b> pour bouger. <b>Passer</b> donne le puck et tu contrôles le receveur. <b>Tirer</b> vise vers <b>le haut</b>.</div>
+
+<script>
+/* ===== Utils ===== */
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dist=(ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
+const norm=(x,y)=>{const L=Math.hypot(x,y)||1;return [x/L,y/L];};
+function rand(a,b){return a+Math.random()*(b-a)}
+let audioCtx=null;
+function beep(freq=440,dur=0.05,type='triangle',vol=0.03){
+  try{
+    audioCtx ||= new (window.AudioContext||window.webkitAudioContext)();
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.value=vol;
+    o.connect(g); g.connect(audioCtx.destination); o.start(); setTimeout(()=>o.stop(), dur*1000);
+  }catch(e){}
+}
+function buzz(ms=20){ if(navigator.vibrate) navigator.vibrate(ms); }
+function toast(msg){
+  const d=document.createElement('div'); d.className='toast'; d.textContent=msg;
+  document.body.appendChild(d); setTimeout(()=>d.remove(), 1400);
+}
+
+/* ===== Canvas (portrait) ===== */
+const canvas=document.getElementById('game'), ctx=canvas.getContext('2d');
+let W,H,pad,goalW;
+function sizeCanvas(){
+  const vw=innerWidth, vh=(visualViewport&&visualViewport.height)||innerHeight;
+  canvas.width=Math.max(320, Math.floor(vw));
+  canvas.height=Math.max(380, Math.floor(vh*0.78));
+  W=canvas.width; H=canvas.height;
+  pad=Math.max(10, Math.min(W,H)*0.04);
+  goalW=Math.max(80, Math.floor(W*0.46)); // largeur des cages
+}
+addEventListener('resize', sizeCanvas, {passive:true}); sizeCanvas();
+
+/* ===== Rink drawing ===== (goals up/down) */
+function drawRink(){
+  ctx.fillStyle='#1c2541'; ctx.fillRect(0,0,W,H);
+  const left=pad, right=W-pad, top=pad, bot=H-pad;
+  // Border
+  ctx.strokeStyle='#5bc0be'; ctx.lineWidth=4; ctx.strokeRect(left,top,right-left,bot-top);
+  // Center line + circle
+  ctx.beginPath(); ctx.moveTo(left, H/2); ctx.lineTo(right, H/2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W/2, H/2, 60, 0, Math.PI*2); ctx.stroke();
+  // Goal openings (top/bottom)
+  const gL = (W-goalW)/2, gR = gL+goalW;
+  ctx.strokeStyle='#e0fbfc'; ctx.lineWidth=8;
+  // Top goal (adversaire)
+  ctx.beginPath(); ctx.moveTo(gL, top); ctx.lineTo(gR, top); ctx.stroke();
+  // Bottom goal (toi)
+  ctx.beginPath(); ctx.moveTo(gL, bot); ctx.lineTo(gR, bot); ctx.stroke();
+}
+
+/* ===== Entities ===== */
+class Player{
+  constructor(x,y,color,role='skater'){
+    this.x=x; this.y=y; this.r=Math.max(12, Math.min(W,H)*0.02);
+    this.color=color; this.role=role;
+    this.vx=0; this.vy=0; this.max=(role==='goalie'? 260: 330);
+  }
+  update(dt){
+    // Goalie: clamp Y near goal line (top for red goalie, bottom for blue)
+    if(this.role==='goalie'){
+      const yMin = (this.color==='blue') ? H-pad-90 : pad+90;
+      const yMax = (this.color==='blue') ? H-pad-30 : pad+30;
+      this.y = clamp(this.y, yMin, yMax);
+      // Track puck X
+      this.x = clamp( lerp(this.x, puck.x, 0.12), pad+this.r, W-pad-this.r );
+    }
+    // Move
+    const s=Math.hypot(this.vx,this.vy);
+    if(s>this.max){ this.vx=this.vx/s*this.max; this.vy=this.vy/s*this.max; }
+    this.x += this.vx*dt; this.y += this.vy*dt;
+    // Friction (players glide a bit)
+    this.vx*=Math.pow(0.985, dt*60); this.vy*=Math.pow(0.985, dt*60);
+    // Bounds
+    const left=pad, right=W-pad, top=pad, bot=H-pad;
+    this.x=clamp(this.x,left+this.r,right-this.r);
+    this.y=clamp(this.y,top+this.r,bot-this.r);
+  }
+  draw(){
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2);
+    ctx.fillStyle=(this===selected)? (this.color==='blue'?'#7cc2ff':'#ff7a7a') : (this.color==='blue'?'#39a0ff':'#ff4d4d');
+    ctx.fill(); ctx.strokeStyle='#00000022'; ctx.stroke();
+  }
+}
+function lerp(a,b,t){return a+(b-a)*t;}
+
+class Puck{
+  constructor(x,y){
+    this.x=x; this.y=y; this.r=Math.max(7, Math.min(W,H)*0.014);
+    this.vx=0; this.vy=0; this.carrier=null;
+  }
+  free(){ this.carrier=null; }
+  passTo(px,py,speed=900){ this.carrier=null; const [nx,ny]=norm(px-this.x,py-this.y); this.vx=nx*speed; this.vy=ny*speed; }
+  shootUp(power=1100){ this.carrier=null; this.vx=0; this.vy=-power; }
+  shootDown(power=1100){ this.carrier=null; this.vx=0; this.vy= power; }
+  update(dt){
+    if(this.carrier){
+      const off=this.carrier.r+this.r+2;
+      const dirY=(this.carrier.color==='blue')? -1 : 1; // blue attaque vers le haut
+      this.x=this.carrier.x; this.y=this.carrier.y + dirY*off;
+      this.vx=this.carrier.vx; this.vy=this.carrier.vy;
+    } else {
+      this.x+=this.vx*dt; this.y+=this.vy*dt;
+      this.vx*=Math.pow(0.992, dt*60); this.vy*=Math.pow(0.992, dt*60);
+      if(Math.abs(this.vx)<2) this.vx=0; if(Math.abs(this.vy)<2) this.vy=0;
+      // Walls with open goals top/bottom
+      const left=pad, right=W-pad, top=pad, bot=H-pad;
+      const gL = (W-goalW)/2, gR=gL+goalW;
+      if(this.x-this.r<left){ this.x=left+this.r; this.vx*=-0.9; }
+      if(this.x+this.r>right){ this.x=right-this.r; this.vx*=-0.9; }
+      if(this.y-this.r<top && !(this.x>gL && this.x<gR)){ this.y=top+this.r; this.vy*=-0.9; }
+      if(this.y+this.r>bot && !(this.x>gL && this.x<gR)){ this.y=bot-this.r; this.vy*=-0.9; }
+    }
+  }
+  draw(){ ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,Math.PI*2); ctx.fillStyle='#f8f8f8'; ctx.fill(); ctx.strokeStyle='#00000022'; ctx.stroke(); }
+}
+
+/* ===== Teams ===== */
+let blue=[], red=[], puck, selected=null, scoreBlue=0, scoreRed=0;
+const scoreBlueEl=document.getElementById('scoreBlue'), scoreRedEl=document.getElementById('scoreRed');
+
+function setup(){
+  blue=[]; red=[];
+  // Spread players (portrait)
+  const cols=[W*0.25,W*0.4,W*0.6,W*0.75];
+  blue.push(new Player(cols[0], H*0.75, 'blue'));
+  blue.push(new Player(cols[1], H*0.65, 'blue'));
+  blue.push(new Player(cols[2], H*0.55, 'blue'));
+  blue.push(new Player(cols[1], H*0.8, 'blue'));
+  blue.push(new Player(cols[2], H*0.7, 'blue'));
+  blue.push(new Player(W/2, H-pad-40, 'blue','goalie'));
+  red.push(new Player(cols[0], H*0.25, 'red'));
+  red.push(new Player(cols[1], H*0.35, 'red'));
+  red.push(new Player(cols[2], H*0.45, 'red'));
+  red.push(new Player(cols[1], H*0.2, 'red'));
+  red.push(new Player(cols[2], H*0.3, 'red'));
+  red.push(new Player(W/2, pad+40, 'red','goalie'));
+  puck = new Puck(W/2, H/2);
+  selected = blue[2]; // milieu offensif
+}
+function updateScores(){ scoreBlueEl.textContent=scoreBlue; scoreRedEl.textContent=scoreRed; }
+
+/* ===== Pickups & collisions ===== */
+function handlePickups(){
+  if(puck.carrier) return;
+  const arr=[...blue,...red];
+  for(const p of arr){
+    if(dist(p.x,p.y,puck.x,puck.y) < p.r + puck.r + 2){
+      puck.carrier=p; beep(300,0.03); break;
+    }
+  }
+}
+function resolveOverlap(a,b){
+  const dx=b.x-a.x, dy=b.y-a.y, L=Math.hypot(dx,dy)||1, overlap=(a.r+b.r)-L;
+  if(overlap>0){ const nx=dx/L, ny=dy/L; a.x-=nx*overlap*0.5; a.y-=ny*overlap*0.5; b.x+=nx*overlap*0.5; b.y+=ny*overlap*0.5; }
+}
+
+/* ===== Goals & restart ===== */
+function checkGoal(){
+  const top=pad, bot=H-pad, gL=(W-goalW)/2, gR=gL+goalW;
+  if(puck.x>gL && puck.x<gR){
+    if(puck.y - puck.r <= top-2){ // into top goal → BLUE scores
+      scoreBlue++; updateScores(); toast('🔵 BUT bleu'); beep(700,0.1,'square',0.05); restart(1);
+    }
+    if(puck.y + puck.r >= bot+2){ // into bottom goal → RED scores
+      scoreRed++; updateScores(); toast('🔴 BUT rouge'); beep(200,0.1,'square',0.05); restart(-1);
+    }
+  }
+}
+function restart(dir=1){
+  // dir=1 → puck légèrement vers le haut (avantage bleu), -1 vers le bas (avantage rouge)
+  blue.forEach(p=>{p.vx=0;p.vy=0}); red.forEach(p=>{p.vx=0;p.vy=0});
+  puck.free(); puck.x=W/2; puck.y=H/2 + (dir*20); puck.vx=0; puck.vy=0;
+  selected = nearestToPuck(blue);
+}
+function nearestToPuck(arr){ let best=null,bd=1e18; for(const p of arr){const d=dist(p.x,p.y,puck.x,puck.y); if(d<bd){bd=d; best=p}} return best; }
+
+/* ===== Input: tap to select blue player ===== */
+canvas.addEventListener('mousedown', onPointer, false);
+canvas.addEventListener('touchstart', onPointer, {passive:true});
+function toWorld(e){
+  const r=canvas.getBoundingClientRect();
+  const x=((e.touches?e.touches[0].clientX:e.clientX)-r.left)*(canvas.width/r.width);
+  const y=((e.touches?e.touches[0].clientY:e.clientY)-r.top)*(canvas.height/r.height);
+  return {x,y};
+}
+function onPointer(e){
+  const {x,y}=toWorld(e);
+  const p = blue.find(b=>dist(x,y,b.x,b.y)<=b.r+10);
+  if(p){ selected=p; toast('✅ Joueur sélectionné'); }
+}
+
+/* ===== Controls: Pass / Shoot / Switch ===== */
+document.getElementById('btnPass').addEventListener('click', ()=>{
+  if(!selected){ toast('Sélectionne un joueur'); return; }
+  if(puck.carrier!==selected){ toast("Ce joueur n'a pas le puck"); return; }
+  const target=findBestPass(selected, blue) || nearestAhead(selected, blue);
+  if(!target || target===selected){ beep(220,0.05); toast('Passe risquée'); return; }
+  puck.x=selected.x; puck.y=selected.y; puck.passTo(target.x, target.y, 980);
+  selected = target; // tu prends le contrôle du receveur
+  beep(560,0.05,'triangle',0.04); buzz(12);
+});
+document.getElementById('btnShoot').addEventListener('click', ()=>{
+  if(!selected){ toast('Sélectionne un joueur'); return; }
+  if(puck.carrier!==selected){ toast("Ce joueur n'a pas le puck"); return; }
+  // Tir vers le haut (but adverse)
+  puck.x=selected.x; puck.y=selected.y; puck.shootUp(1200);
+  beep(760,0.07,'sawtooth',0.04); buzz(20);
+});
+document.getElementById('btnSwitch').addEventListener('click', ()=>{
+  selected = nearestToPuck(blue);
+  toast('Changement de joueur');
+});
+
+/* Choix de passe : coéquipier libre plus haut (y plus petit) et pas trop loin d’un rouge */
+function findBestPass(from, team){
+  let best=null, score=-1e9;
+  for(const m of team){
+    if(m===from || m.role==='goalie') continue;
+    // favoriser vers le haut et distance raisonnable
+    const upScore = (from.y - m.y); // plus haut = mieux
+    const d = dist(from.x,from.y,m.x,m.y);
+    let risk=0;
+    for(const r of red){
+      // distance du rouge au segment from->m
+      const ax=from.x, ay=from.y, bx=m.x, by=m.y, cx=r.x, cy=r.y;
+      const abx=bx-ax, aby=by-ay, ab2=abx*abx+aby*aby||1;
+      const t=clamp(((cx-ax)*abx + (cy-ay)*aby)/ab2, 0, 1);
+      const px=ax+t*abx, py=ay+t*aby;
+      const ds=dist(px,py,cx,cy);
+      if(ds<60) risk += (60-ds); // pénalité si rouge proche de la ligne de passe
+    }
+    const sc = upScore*0.3 - d*0.15 - risk*0.6;
+    if(sc>score){ score=sc; best=m; }
+  }
+  return best;
+}
+function nearestAhead(from, team){
+  let best=null, bd=1e18;
+  for(const m of team){
+    if(m===from) continue;
+    if(m.y < from.y){ // seulement vers le haut
+      const d=dist(from.x,from.y,m.x,m.y); if(d<bd){bd=d; best=m;}
+    }
+  }
+  return best;
+}
+
+/* ===== Virtual Joystick ===== */
+const joy=document.getElementById('joystick'), knob=document.getElementById('knob');
+let joyActive=false, joyCx=0, joyCy=0, joyRad=0, joyVX=0, joyVY=0;
+function setupJoyGeom(){
+  const r=joy.getBoundingClientRect();
+  joyCx=r.left + r.width/2; joyCy=r.top + r.height/2; joyRad=r.width/2;
+}
+addEventListener('resize', setupJoyGeom, {passive:true}); setTimeout(setupJoyGeom, 50);
+
+function joyStart(e){
+  e.preventDefault(); setupJoyGeom(); joyActive=true; updateKnob(0,0);
+}
+function joyMove(e){
+  if(!joyActive) return;
+  const t=e.touches?e.touches[0]:e;
+  const dx=t.clientX-joyCx, dy=t.clientY-joyCy;
+  const L=Math.hypot(dx,dy); const lim=joyRad*0.85;
+  const k = L>lim ? lim/L : 1;
+  const kx=dx*k, ky=dy*k;
+  updateKnob(kx,ky);
+  const [nx,ny]=norm(dx,dy);
+  const mag = Math.min(1, L/lim);
+  joyVX = nx*mag; joyVY = ny*mag;
+}
+function joyEnd(e){
+  joyActive=false; updateKnob(0,0); joyVX=0; joyVY=0;
+}
+function updateKnob(dx,dy){
+  knob.style.transform=`translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+}
+joy.addEventListener('touchstart', joyStart, {passive:false});
+joy.addEventListener('touchmove', joyMove, {passive:false});
+joy.addEventListener('touchend', joyEnd, {passive:false});
+joy.addEventListener('mousedown', joyStart);
+addEventListener('mousemove', joyMove);
+addEventListener('mouseup', joyEnd);
+
+/* ===== AI rouge (simple mais joueuse) ===== */
+function aiStep(dt){
+  const hasRed = puck.carrier && puck.carrier.color==='red';
+  for(const p of red){
+    if(p.role==='goalie') continue;
+    if(hasRed){
+      if(p===puck.carrier){
+        // tirer si proche du bas (ton but) et centré
+        if(p.y>H*0.7 && Math.random()<0.2){
+          puck.x=p.x; puck.y=p.y; puck.shootDown(1100); // attaque vers le bas
+        } else if(Math.random()<0.25){
+          // passe à un coéquipier plus bas (vers le bas)
+          const mate = red.filter(m=>m!==p && m.role!=='goalie').sort((a,b)=> (b.y-a.y) )[0];
+          if(mate){ puck.x=p.x; puck.y=p.y; puck.passTo(mate.x, mate.y, 900); }
+        } else {
+          // progresse vers le bas
+          p.vx += rand(-40,40); p.vy += 140;
+        }
+      } else {
+        // soutien : se placer en triangles
+        p.vx += rand(-20,20); p.vy += 60;
+      }
+    } else {
+      // Sans puck : marquer le porteur bleu ou se replacer
+      const carrierBlue = puck.carrier && puck.carrier.color==='blue' ? puck.carrier : nearestToPuck(blue);
+      if(carrierBlue){
+        const [nx,ny]=norm(carrierBlue.x - p.x, carrierBlue.y - p.y);
+        p.vx += nx*100; p.vy += ny*100;
+      } else {
+        p.vx += rand(-30,30); p.vy += rand(-10,10);
+      }
+    }
+  }
+}
+
+/* ===== Pause & Reset ===== */
+let paused=false;
+document.getElementById('btnPause').addEventListener('click',()=>{
+  paused=!paused;
+  document.getElementById('btnPause').textContent = paused ? '▶️ Reprendre' : '⏸︎ Pause';
+});
+document.getElementById('btnReset').addEventListener('click',()=>{
+  scoreBlue=0; scoreRed=0; updateScores(); setup(); toast('↻ Reset');
+});
+
+/* ===== Main Loop ===== */
+let last=performance.now();
+function frame(ts){
+  const dt = paused ? 0 : Math.min(0.033, (ts-last)/1000); last=ts;
+  // Apply joystick to selected blue (move vector is up when VY<0)
+  if(selected){
+    const speed = selected.role==='goalie' ? 180 : 260;
+    selected.vx += joyVX * speed;
+    selected.vy += joyVY * speed;
+  }
+  // AI
+  aiStep(dt);
+  // Update players
+  blue.forEach(p=>p.update(dt));
+  red.forEach(p=>p.update(dt));
+  // Avoid heavy overlaps (light resolve within teams)
+  for(let i=0;i<blue.length;i++)for(let j=i+1;j<blue.length;j++)resolveOverlap(blue[i],blue[j]);
+  for(let i=0;i<red.length;i++)for(let j=i+1;j<red.length;j++)resolveOverlap(red[i],red[j]);
+  // Puck
+  puck.update(dt);
+  handlePickups();
+  checkGoal();
+  // Draw
+  drawRink();
+  blue.forEach(p=>p.draw());
+  red.forEach(p=>p.draw());
+  puck.draw();
+  requestAnimationFrame(frame);
+}
+
+setup(); updateScores(); requestAnimationFrame(frame);
+</script>
 </body>
 </html>
