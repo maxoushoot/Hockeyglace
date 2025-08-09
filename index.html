@@ -11,6 +11,7 @@
   .hud{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;gap:8px}
   .scores{display:flex;gap:8px;align-items:baseline;font-size:18px}
   .badge{padding:2px 8px;border-radius:999px;background:#5bc0be;color:#001219;font-weight:900}
+  #timer{min-width:70px;text-align:center;font-size:18px;font-weight:900}
   .controls{position:fixed;left:12px;bottom:12px;right:12px;height:20vh;display:flex;justify-content:space-between;align-items:flex-end;pointer-events:none}
   /* Joystick */
   .joy{position:relative;width:36vw;max-width:240px;aspect-ratio:1/1;border-radius:999px;background:#00000020;outline:2px solid #ffffff22;pointer-events:auto;touch-action:none}
@@ -29,6 +30,7 @@
       <span>🔵 <strong id="scoreBlue">0</strong></span><span>—</span><span><strong id="scoreRed">0</strong> 🔴</span>
       <span class="badge">But en haut (adversaire) — Ton but en bas</span>
     </div>
+    <div id="timer">03:00</div>
     <div>
       <button id="btnReset" class="btn">↻ Reset</button>
       <button id="btnPause" class="btn">⏸︎ Pause</button>
@@ -169,11 +171,12 @@ class Puck{
 }
 
 /* ===== Teams ===== */
-let blue=[], red=[], puck, selected=null, scoreBlue=0, scoreRed=0;
-const scoreBlueEl=document.getElementById('scoreBlue'), scoreRedEl=document.getElementById('scoreRed');
+let blue=[], red=[], puck, selected=null, scoreBlue=0, scoreRed=0, timeLeft=180, gameOver=false;
+const scoreBlueEl=document.getElementById('scoreBlue'), scoreRedEl=document.getElementById('scoreRed'), timerEl=document.getElementById('timer');
 
 function setup(){
   blue=[]; red=[];
+  timeLeft=180; gameOver=false; paused=false;
   // Spread players (portrait)
   const cols=[W*0.25,W*0.4,W*0.6,W*0.75];
   blue.push(new Player(cols[0], H*0.75, 'blue'));
@@ -190,8 +193,10 @@ function setup(){
   red.push(new Player(W/2, pad+40, 'red','goalie'));
   puck = new Puck(W/2, H/2);
   selected = blue[2]; // milieu offensif
+  updateTimer();
 }
 function updateScores(){ scoreBlueEl.textContent=scoreBlue; scoreRedEl.textContent=scoreRed; }
+function updateTimer(){ const m=Math.floor(timeLeft/60).toString().padStart(2,'0'); const s=Math.floor(timeLeft%60).toString().padStart(2,'0'); timerEl.textContent=`${m}:${s}`; }
 
 /* ===== Pickups & collisions ===== */
 function handlePickups(){
@@ -374,17 +379,23 @@ function aiStep(dt){
 /* ===== Pause & Reset ===== */
 let paused=false;
 document.getElementById('btnPause').addEventListener('click',()=>{
+  if(gameOver){ toast('Match terminé'); return; }
   paused=!paused;
   document.getElementById('btnPause').textContent = paused ? '▶️ Reprendre' : '⏸︎ Pause';
 });
 document.getElementById('btnReset').addEventListener('click',()=>{
-  scoreBlue=0; scoreRed=0; updateScores(); setup(); toast('↻ Reset');
+  scoreBlue=0; scoreRed=0; updateScores(); setup(); document.getElementById('btnPause').textContent='⏸︎ Pause'; toast('↻ Reset');
 });
 
 /* ===== Main Loop ===== */
 let last=performance.now();
 function frame(ts){
   const dt = paused ? 0 : Math.min(0.033, (ts-last)/1000); last=ts;
+  if(!paused && !gameOver){
+    timeLeft = Math.max(0, timeLeft - dt);
+    if(timeLeft===0){ gameOver=true; paused=true; toast('⏱️ Fin du match'); }
+    updateTimer();
+  }
   // Apply joystick to selected blue (move vector is up when VY<0)
   if(selected){
     const speed = selected.role==='goalie' ? 180 : 260;
